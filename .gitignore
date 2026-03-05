@@ -208,5 +208,6 @@ __marimo__/
 
 # Specific to this project
 data/
+saved_models/
 *.bin
 *.ipynb
