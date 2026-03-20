@@ -9,7 +9,7 @@ from models.face_detector import FaceDetector
 
 def load_model(weights_path, device='cpu'):
     print("Đang nạp bộ não AI...")
-    model = MobileFaceNet(embedding_size=128).to(device)
+    model = MobileFaceNet(embedding_size=512).to(device)
     model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
     model.eval()
     return model
@@ -26,7 +26,7 @@ def preprocess_face(face_img):
     return transform(face_img).unsqueeze(0)
 
 def get_embedding(model, img_tensor, device='cpu'):
-    """Trích xuất vector 128 chiều."""
+    """Trích xuất vector 512 chiều."""
     img_tensor = img_tensor.to(device)
     with torch.no_grad():
         feature = model(img_tensor)
@@ -35,18 +35,35 @@ def get_embedding(model, img_tensor, device='cpu'):
 def cosine_similarity(vec1, vec2):
     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
+def find_existing_locker(current_vector, lockers, threshold):
+    """
+    Kiểm tra xem khuôn mặt hiện tại đã đăng ký tủ nào chưa.
+    Trả về (locker_id, similarity) nếu tìm thấy, hoặc (None, 0) nếu chưa.
+    """
+    best_match_id = None
+    highest_sim = 0
+
+    for locker_id, saved_vector in lockers.items():
+        if saved_vector is not None:
+            sim = cosine_similarity(current_vector, saved_vector)
+            if sim > threshold and sim > highest_sim:
+                highest_sim = sim
+                best_match_id = locker_id
+
+    return best_match_id, highest_sim
+
 # Main
 if __name__ == "__main__":
     # 1. Cấu hình
     WEIGHTS_PATH = 'saved_models/mobilefacenet.pth'
-    THRESHOLD = 0.45
+    THRESHOLD = 0.60
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = load_model(WEIGHTS_PATH, device)
 
     # Khởi tạo Face Detector 
     face_detector = FaceDetector()
 
-    # 2. Giả lập cơ sở dữ liệu tủ đồ (2 tủ trống)
+    # 2. Giả lập cơ sở dữ liệu tủ đồ 
     lockers = {1: None, 2: None}
 
     # 3. Khởi động Webcam
@@ -98,6 +115,16 @@ if __name__ == "__main__":
                 print("-> Không tìm thấy khuôn mặt! Vui lòng nhìn thẳng vào camera.")
                 continue
 
+            tensor = preprocess_face(face_img)
+            current_vector = get_embedding(model, tensor, device)
+
+            # ✅ KIỂM TRA: Khuôn mặt này đã đăng ký tủ nào chưa?
+            existing_locker, sim = find_existing_locker(current_vector, lockers, THRESHOLD)
+            if existing_locker is not None:
+                print(f"-> ⚠️  CẢNH BÁO: Bạn đã gửi đồ ở tủ số {existing_locker} rồi! (Độ tin cậy: {sim:.2f})")
+                print("   Vui lòng lấy đồ ra trước khi gửi lại.")
+                continue
+
             # Tìm tủ trống
             empty_locker = None
             for locker_id, saved_vector in lockers.items():
@@ -108,9 +135,7 @@ if __name__ == "__main__":
             if empty_locker is None:
                 print("-> Xin lỗi, hiện tại đã hết tủ trống!")
             else:
-                tensor = preprocess_face(face_img)
-                vector = get_embedding(model, tensor, device)
-                lockers[empty_locker] = vector
+                lockers[empty_locker] = current_vector  # Tái dùng vector đã tính, không cần tính lại
                 print(f"-> Gửi đồ thành công! Tủ số {empty_locker} đã mở. (Đã lưu dữ liệu khuôn mặt)")
 
         elif key == ord('o'):
@@ -122,15 +147,7 @@ if __name__ == "__main__":
             tensor = preprocess_face(face_img)
             current_vector = get_embedding(model, tensor, device)
 
-            matched_locker = None
-            highest_sim = 0
-
-            for locker_id, saved_vector in lockers.items():
-                if saved_vector is not None:
-                    sim = cosine_similarity(current_vector, saved_vector)
-                    if sim > THRESHOLD and sim > highest_sim:
-                        highest_sim = sim
-                        matched_locker = locker_id
+            matched_locker, highest_sim = find_existing_locker(current_vector, lockers, THRESHOLD)
 
             if matched_locker is not None:
                 print(f"-> Xác thực thành công (Độ tin cậy: {highest_sim:.2f}). Mở tủ số {matched_locker}!")
