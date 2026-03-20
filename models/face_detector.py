@@ -1,26 +1,42 @@
 import cv2
 
-# Face Detector 
 class FaceDetector:
     """
-    Dùng OpenCV's built-in Haar Cascade.
+    Sử dụng YuNet tích hợp sẵn trong OpenCV.
+    Siêu nhẹ (1.8MB), tốc độ cực nhanh trên CPU 
     """
-    def __init__(self):
-        # Haar Cascade — model để khoanh vùng khuôn mặt trong hình
-        self.detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    def __init__(self, model_path="saved_models/face_detection_yunet_2023mar.onnx", conf_threshold=0.6):
+        # Khởi tạo FaceDetectorYN của OpenCV
+        self.detector = cv2.FaceDetectorYN.create(
+            model=model_path,
+            config="",
+            input_size=(300, 300), # Kích thước khung
+            score_threshold=conf_threshold,
+            nms_threshold=0.3,
+            top_k=5000
+        )
 
     def detect(self, frame):
-        """Trả về (x, y, w, h) của khuôn mặt đầu tiên tìm thấy, hoặc None."""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.detector.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(80, 80)   # Bỏ qua khuôn mặt quá nhỏ
-        )
-        if len(faces) == 0:
+        """Trả về (x, y, w, h) của khuôn mặt rõ nhất."""
+        height, width, _ = frame.shape
+     
+        self.detector.setInputSize((width, height))
+        
+        # Nhận diện
+        _, faces = self.detector.detect(frame)
+        
+        # Nếu không tìm thấy ai
+        if faces is None:
             return None
-
-        # Lấy khuôn mặt lớn nhất (gần camera nhất)
-        faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-        return faces[0]  # (x, y, w, h)
+            
+        # faces là một mảng numpy, mỗi hàng là 1 khuôn mặt.
+        # Lấy khuôn mặt có độ tin cậy (score - ở vị trí index 14) cao nhất
+        best_face = max(faces, key=lambda f: f[14])
+        
+        x, y, w, h = int(best_face[0]), int(best_face[1]), int(best_face[2]), int(best_face[3])
+        
+        # Chống tràn viền 
+        x = max(0, x)
+        y = max(0, y)
+        
+        return (x, y, w, h)
