@@ -1,108 +1,103 @@
 import torch
-import torch.nn as nn
+from torch.nn import Module, Conv2d, BatchNorm1d, BatchNorm2d, PReLU, Linear, Sequential
 
-class ConvBlock(nn.Module):
-    """Lớp tích chập cơ bản đi kèm Batch Normalization và hàm kích hoạt PReLU."""
-    def __init__(self, in_c, out_c, kernel=(1,1), stride=(1,1), padding=(0,0), groups=1):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels=in_c, out_channels=out_c,kernel_size=kernel,stride=stride, padding=padding, groups=groups, bias=False)
-        self.bn= nn.BatchNorm2d(out_c)
-        self.prelu = nn.PReLU(out_c)
+class Flatten(Module):
+    """Làm phẳng tensor để đưa vào lớp Linear"""
+    def forward(self, input):
+        return input.view(input.size(0), -1)
 
-    def forward(self, x):
-        return self.prelu(self.bn(self.conv(x)))
+def l2_norm(input, axis=1):
+    """Chuẩn hóa L2: Ép chiều dài của vector về đúng bằng 1"""
+    norm = torch.norm(input, 2, axis, True)
+    output = torch.div(input, norm)
+    return output
 
-class LinearBlock(nn.Module):
-    """Lớp 'Linear' không có hàm kích hoạt phi tuyến tính ở cuối."""
-    def __init__(self, in_c, out_c, kernel=(1,1), stride=(1,1), padding=(0,0), groups=1):
-        super().__init__()
-        self.conv = nn.Conv2d(in_c, out_c, kernel, stride, padding, groups=groups, bias=False)
-        self.bn = nn.BatchNorm2d(out_c)
-    
-    def forward(self, x):
-        return self.bn(self.conv(x))
-
-class Bottleneck(nn.Module):
-    """Khối Residual Bottleneck như trong kiến trúc MobileNetV2."""
-    def __init__(self, in_c, out_c, stride, t):
-        super().__init__()
-        # Chỉ dùng kết nối thặng dư (residual connection) khi stride=1 và số channel không đổi
-        self.use_res_connect = stride == 1 and in_c == out_c
-        exp_c = in_c * t # Hệ số mở rộng t
-        
-        self.conv = nn.Sequential(
-            # 1. Pointwise (Mở rộng số lượng channel)
-            ConvBlock(in_c, exp_c, kernel=(1, 1), stride=(1, 1), padding=(0, 0)),
-            # 2. Depthwise (Tích chập theo từng channel riêng biệt)
-            ConvBlock(exp_c, exp_c, kernel=(3, 3), stride=(stride, stride), padding=(1, 1), groups=exp_c),
-            # 3. Linear Pointwise (Chiếu lại về số channel mong muốn, không dùng PReLU)
-            LinearBlock(exp_c, out_c, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
-        )
+class Conv_block(Module):
+    def __init__(self, in_c, out_c, kernel=(1, 1), stride=(1, 1), padding=(0, 0), groups=1):
+        super(Conv_block, self).__init__()
+        self.conv = Conv2d(in_c, out_channels=out_c, kernel_size=kernel, groups=groups, stride=stride, padding=padding, bias=False)
+        self.bn = BatchNorm2d(out_c)
+        self.prelu = PReLU(out_c)
         
     def forward(self, x):
-        if self.use_res_connect:
-            return x + self.conv(x)
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.prelu(x)
+        return x
+
+class Linear_block(Module):
+    def __init__(self, in_c, out_c, kernel=(1, 1), stride=(1, 1), padding=(0, 0), groups=1):
+        super(Linear_block, self).__init__()
+        self.conv = Conv2d(in_c, out_channels=out_c, kernel_size=kernel, groups=groups, stride=stride, padding=padding, bias=False)
+        self.bn = BatchNorm2d(out_c)
+        
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        return x
+
+class Depth_Wise(Module):
+    def __init__(self, in_c, out_c, residual=False, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=1):
+        super(Depth_Wise, self).__init__()
+        self.conv = Conv_block(in_c, out_c=groups, kernel=(1, 1), padding=(0, 0), stride=(1, 1))
+        self.conv_dw = Conv_block(groups, groups, groups=groups, kernel=kernel, padding=padding, stride=stride)
+        self.project = Linear_block(groups, out_c, kernel=(1, 1), padding=(0, 0), stride=(1, 1))
+        self.residual = residual
+        
+    def forward(self, x):
+        if self.residual:
+            short_cut = x
+        x = self.conv(x)
+        x = self.conv_dw(x)
+        x = self.project(x)
+        if self.residual:
+            output = short_cut + x
         else:
-            return self.conv(x)
+            output = x
+        return output
 
-class MobileFaceNet(nn.Module):
-    def __init__(self, embedding_size=128):
-        super().__init__()
-        # Theo đúng thông số của Table 1 trong bài báo
+class Residual(Module):
+    def __init__(self, c, num_block, groups, kernel=(3, 3), stride=(1, 1), padding=(1, 1)):
+        super(Residual, self).__init__()
+        modules = []
+        for _ in range(num_block):
+            modules.append(Depth_Wise(c, c, residual=True, kernel=kernel, padding=padding, stride=stride, groups=groups))
+        self.model = Sequential(*modules)
         
-        # [Input] 112x112x3 -> [Output] 56x56x64
-        self.conv1 = ConvBlock(3, 64, kernel=(3, 3), stride=(2, 2), padding=(1, 1)) 
-        
-        # [Input] 56x56x64 -> [Output] 56x56x64 (Depthwise conv3x3)
-        self.dw_conv1 = ConvBlock(64, 64, kernel=(3, 3), stride=(1, 1), padding=(1, 1), groups=64)
-        
-        # Các khối Bottleneck chính
-        self.blocks = nn.Sequential(
-            # t=2, c=64, n=5, s=2
-            self._make_layer(Bottleneck, t=2, in_c=64, out_c=64, n=5, s=2),
-            # t=4, c=128, n=1, s=2
-            self._make_layer(Bottleneck, t=4, in_c=64, out_c=128, n=1, s=2),
-            # t=2, c=128, n=6, s=1
-            self._make_layer(Bottleneck, t=2, in_c=128, out_c=128, n=6, s=1),
-            # t=4, c=128, n=1, s=2
-            self._make_layer(Bottleneck, t=4, in_c=128, out_c=128, n=1, s=2),
-            # t=2, c=128, n=2, s=1
-            self._make_layer(Bottleneck, t=2, in_c=128, out_c=128, n=2, s=1)
-        )
-        
-        # [Input] 7x7x128 -> [Output] 7x7x512
-        self.conv2 = ConvBlock(128, 512, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
-        
-        # Linear GDConv7x7
-        self.linear_gdconv = LinearBlock(512, 512, kernel=(7, 7), stride=(1, 1), padding=(0, 0), groups=512)
-        
-        # Linear conv1x1
-        self.linear_conv = LinearBlock(512, embedding_size, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
+    def forward(self, x):
+        return self.model(x)
 
-    def _make_layer(self, block, t, in_c, out_c, n, s):
-        layers = []
-        # Lớp đầu tiên của chuỗi sử dụng stride = s
-        layers.append(block(in_c, out_c, s, t))
-        # Các lớp sau trong chuỗi sử dụng stride = 1
-        for i in range(1, n):
-            layers.append(block(out_c, out_c, 1, t))
-        return nn.Sequential(*layers)
-
+class MobileFaceNet(Module):
+    def __init__(self, embedding_size=128): # Sửa lại default embedding_size là 128 cho khớp chuẩn bài toán
+        super(MobileFaceNet, self).__init__()
+        self.conv1 = Conv_block(3, 64, kernel=(3, 3), stride=(2, 2), padding=(1, 1))
+        self.conv2_dw = Conv_block(64, 64, kernel=(3, 3), stride=(1, 1), padding=(1, 1), groups=64)
+        self.conv_23 = Depth_Wise(64, 64, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=128)
+        self.conv_3 = Residual(64, num_block=4, groups=128, kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+        self.conv_34 = Depth_Wise(64, 128, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=256)
+        self.conv_4 = Residual(128, num_block=6, groups=256, kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+        self.conv_45 = Depth_Wise(128, 128, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=512)
+        self.conv_5 = Residual(128, num_block=2, groups=256, kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+        self.conv_6_sep = Conv_block(128, 512, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
+        self.conv_6_dw = Linear_block(512, 512, groups=512, kernel=(7,7), stride=(1, 1), padding=(0, 0))
+        self.conv_6_flatten = Flatten()
+        self.linear = Linear(512, embedding_size, bias=False)
+        self.bn = BatchNorm1d(embedding_size)
+    
     def forward(self, x):
         out = self.conv1(x)
-        out = self.dw_conv1(out)
-        out = self.blocks(out)
-        out = self.conv2(out)
-        out = self.linear_gdconv(out)
-        out = self.linear_conv(out)
+        out = self.conv2_dw(out)
+        out = self.conv_23(out)
+        out = self.conv_3(out)
+        out = self.conv_34(out)
+        out = self.conv_4(out)
+        out = self.conv_45(out)
+        out = self.conv_5(out)
+        out = self.conv_6_sep(out)
+        out = self.conv_6_dw(out)
+        out = self.conv_6_flatten(out)
+        out = self.linear(out)
+        out = self.bn(out)
         
-        # Làm phẳng ma trận thành vector đặc trưng (Batch_size, 128)
-        return out.view(out.shape[0], -1)
-    
-if __name__ == "__main__":
-    # Test thử mô hình
-    model = MobileFaceNet(embedding_size=128)
-    dummy_input = torch.randn(4, 3, 112, 112) # Giả lập 1 batch gồm 4 ảnh 112x112
-    output = model(dummy_input)
-    print(f"Shape của ảnh đầu vào: {dummy_input.shape}")
-    print(f"Shape của vector đầu ra: {output.shape}") 
+        # Tự động chuẩn hóa vector đầu ra
+        return l2_norm(out)
