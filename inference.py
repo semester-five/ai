@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
-from torchvision import transforms
 
 from models.face_detector import FaceDetector
 
@@ -10,7 +9,7 @@ def load_model(weights_path: str) -> ort.InferenceSession:
     print("Đang nạp bộ não AI...")
     session = ort.InferenceSession(
         weights_path,
-        providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+        providers=['CPUExecutionProvider']
     )
     input_shape = session.get_inputs()[0].shape
     print(f"-> Model loaded. Input shape: {input_shape}")
@@ -18,17 +17,23 @@ def load_model(weights_path: str) -> ort.InferenceSession:
 
 
 def preprocess_face(face_img: np.ndarray) -> np.ndarray:
-    """Pre-process a cropped face image into a model-ready numpy array."""
+    """Pre-process face image using pure OpenCV/Numpy (No PyTorch needed)."""
+    # 1. Resize ảnh
+    face_img = cv2.resize(face_img, (112, 112))
+    # 2. Chuyển hệ màu BGR sang RGB
     face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((112, 112)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-    # ONNX Runtime expects a plain numpy array, not a torch.Tensor
-    tensor = transform(face_img).unsqueeze(0)   # (1, 3, 112, 112)
-    return tensor.numpy().astype(np.float32)    # → numpy float32
+    
+    # 3. Normalize (mean=0.5, std=0.5) 
+    # Công thức: (pixel / 255.0 - 0.5) / 0.5 = (pixel / 127.5) - 1.0
+    face_img = (face_img.astype(np.float32) / 127.5) - 1.0
+    
+    # 4. Đổi trục từ (Height, Width, Channels) sang (Channels, Height, Width)
+    face_img = np.transpose(face_img, (2, 0, 1))
+    
+    # 5. Thêm chiều Batch (1, 3, 112, 112) để đưa vào ONNX
+    tensor = np.expand_dims(face_img, axis=0)
+    
+    return tensor
 
 
 def get_embedding(session: ort.InferenceSession, input_array: np.ndarray) -> np.ndarray:
@@ -65,7 +70,7 @@ def find_existing_locker(
 
 if __name__ == "__main__":
     # 1. Config
-    WEIGHTS_PATH = 'saved_models/mobilefacenet.onnx'
+    WEIGHTS_PATH = 'saved_models/mobilefacenet_int8.onnx'
     THRESHOLD = 0.60
 
     session = load_model(WEIGHTS_PATH)
