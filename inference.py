@@ -1,21 +1,24 @@
 import cv2
-import torch
 import numpy as np
+import onnxruntime as ort
 from torchvision import transforms
 
-# Import model từ thư mục 
-from models.mobilefacenet import MobileFaceNet
 from models.face_detector import FaceDetector
 
-def load_model(weights_path, device='cpu'):
-    print("Đang nạp bộ não AI...")
-    model = MobileFaceNet(embedding_size=512).to(device)
-    model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
-    model.eval()
-    return model
 
-def preprocess_face(face_img):
-    """Tiền xử lý khuôn mặt đã được cắt từ Webcam."""
+def load_model(weights_path: str) -> ort.InferenceSession:
+    print("Đang nạp bộ não AI...")
+    session = ort.InferenceSession(
+        weights_path,
+        providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+    )
+    input_shape = session.get_inputs()[0].shape
+    print(f"-> Model loaded. Input shape: {input_shape}")
+    return session
+
+
+def preprocess_face(face_img: np.ndarray) -> np.ndarray:
+    """Pre-process a cropped face image into a model-ready numpy array."""
     face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
     transform = transforms.Compose([
         transforms.ToPILImage(),
@@ -23,137 +26,132 @@ def preprocess_face(face_img):
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
-    return transform(face_img).unsqueeze(0)
+    # ONNX Runtime expects a plain numpy array, not a torch.Tensor
+    tensor = transform(face_img).unsqueeze(0)   # (1, 3, 112, 112)
+    return tensor.numpy().astype(np.float32)    # → numpy float32
 
-def get_embedding(model, img_tensor, device='cpu'):
-    """Trích xuất vector 512 chiều."""
-    img_tensor = img_tensor.to(device)
-    with torch.no_grad():
-        feature = model(img_tensor)
-    return feature.cpu().numpy().flatten()
 
-def cosine_similarity(vec1, vec2):
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+def get_embedding(session: ort.InferenceSession, input_array: np.ndarray) -> np.ndarray:
+    """Run a forward pass and return the L2-normalised embedding vector."""
+    input_name = session.get_inputs()[0].name
+    output = session.run(None, {input_name: input_array})
+    embedding = output[0].flatten()
+    # Normalise just in case the exported model omits the final L2 norm
+    norm = np.linalg.norm(embedding)
+    return embedding / norm if norm > 0 else embedding
 
-def find_existing_locker(current_vector, lockers, threshold):
+
+def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+
+
+def find_existing_locker(
+    current_vector: np.ndarray,
+    lockers: dict,
+    threshold: float
+) -> tuple[int | None, float]:
     """
-    Kiểm tra xem khuôn mặt hiện tại đã đăng ký tủ nào chưa.
-    Trả về (locker_id, similarity) nếu tìm thấy, hoặc (None, 0) nếu chưa.
+    Check whether the current face is already registered to a locker.
+    Returns (locker_id, similarity) if found, otherwise (None, 0.0).
     """
-    best_match_id = None
-    highest_sim = 0
-
+    best_id, highest_sim = None, 0.0
     for locker_id, saved_vector in lockers.items():
         if saved_vector is not None:
             sim = cosine_similarity(current_vector, saved_vector)
             if sim > threshold and sim > highest_sim:
                 highest_sim = sim
-                best_match_id = locker_id
+                best_id = locker_id
+    return best_id, highest_sim
 
-    return best_match_id, highest_sim
-
-# Main
 if __name__ == "__main__":
-    # 1. Cấu hình
-    WEIGHTS_PATH = 'saved_models/mobilefacenet.pth'
+    # 1. Config
+    WEIGHTS_PATH = 'saved_models/mobilefacenet.onnx'
     THRESHOLD = 0.60
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(WEIGHTS_PATH, device)
 
-    # Khởi tạo Face Detector 
+    session = load_model(WEIGHTS_PATH)
     face_detector = FaceDetector()
 
-    # 2. Giả lập cơ sở dữ liệu tủ đồ 
+    # 2. Locker database 
     lockers = {1: None, 2: None}
 
-    # 3. Khởi động Webcam
+    # 3. Start webcam
     cap = cv2.VideoCapture(0)
-    print("\n--- HỆ THỐNG KIOSK TỦ ĐỒ SẴN SÀNG ---")
-    print("Nhấn 'I' để Check-in (Gửi đồ)")
-    print("Nhấn 'O' để Check-out (Lấy đồ)")
-    print("Nhấn 'Q' để Thoát")
+    print("\n--- LOCKER KIOSK SYSTEM READY ---")
+    print("Press 'I' to Check-in  (store items)")
+    print("Press 'O' to Check-out (retrieve items)")
+    print("Press 'Q' to Quit")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Lật khung hình cho giống gương
         frame = cv2.flip(frame, 1)
         display_frame = frame.copy()
 
-        # Tìm khuôn mặt
         ih, iw, _ = frame.shape
         detection = face_detector.detect(frame)
         face_img = None
 
         if detection is not None:
             x, y, w, h = detection
-            # Cắt khuôn mặt (mở rộng thêm viền)
-            x1 = max(0, x - 20)
-            y1 = max(0, y - 20)
-            x2 = min(iw, x + w + 20)
-            y2 = min(ih, y + h + 20)
+            x1, y1 = max(0, x - 20), max(0, y - 20)
+            x2, y2 = min(iw, x + w + 20), min(ih, y + h + 20)
             face_img = frame[y1:y2, x1:x2]
             cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        # Hướng dẫn hiển thị trên màn hình
-        cv2.putText(display_frame, "I: GUi DO | O: LAY DO | Q: THOAT", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
+        cv2.putText(display_frame, "I: CHECK-IN | O: CHECK-OUT | Q: QUIT",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.imshow("Kiosk FaceID", display_frame)
         key = cv2.waitKey(1) & 0xFF
 
-        # --- LOGIC NHẤN PHÍM ---
+        # --- KEY LOGIC ---
         if key == ord('q'):
-            print("Đang tắt hệ thống...")
+            print("Shutting down...")
             break
 
         elif key == ord('i'):
-            print("\n[YÊU CẦU GỬI ĐỒ]")
+            print("\n[CHECK-IN REQUEST]")
             if face_img is None or face_img.size == 0:
-                print("-> Không tìm thấy khuôn mặt! Vui lòng nhìn thẳng vào camera.")
+                print("-> No face detected. Please look directly at the camera.")
                 continue
 
-            tensor = preprocess_face(face_img)
-            current_vector = get_embedding(model, tensor, device)
+            input_array = preprocess_face(face_img)
+            current_vector = get_embedding(session, input_array)
 
-            # ✅ KIỂM TRA: Khuôn mặt này đã đăng ký tủ nào chưa?
+            # Block duplicate check-in
             existing_locker, sim = find_existing_locker(current_vector, lockers, THRESHOLD)
             if existing_locker is not None:
-                print(f"-> ⚠️  CẢNH BÁO: Bạn đã gửi đồ ở tủ số {existing_locker} rồi! (Độ tin cậy: {sim:.2f})")
-                print("   Vui lòng lấy đồ ra trước khi gửi lại.")
+                print(f"-> ⚠️  WARNING: You already have items in locker #{existing_locker} "
+                      f"(similarity: {sim:.2f}). Please check out first.")
                 continue
 
-            # Tìm tủ trống
-            empty_locker = None
-            for locker_id, saved_vector in lockers.items():
-                if saved_vector is None:
-                    empty_locker = locker_id
-                    break
-
+            # Find an empty locker
+            empty_locker = next(
+                (lid for lid, vec in lockers.items() if vec is None), None
+            )
             if empty_locker is None:
-                print("-> Xin lỗi, hiện tại đã hết tủ trống!")
+                print("-> Sorry, all lockers are currently occupied.")
             else:
-                lockers[empty_locker] = current_vector  # Tái dùng vector đã tính, không cần tính lại
-                print(f"-> Gửi đồ thành công! Tủ số {empty_locker} đã mở. (Đã lưu dữ liệu khuôn mặt)")
+                lockers[empty_locker] = current_vector
+                print(f"-> Check-in successful! Locker #{empty_locker} is now open.")
 
         elif key == ord('o'):
-            print("\n[YÊU CẦU LẤY ĐỒ]")
+            print("\n[CHECK-OUT REQUEST]")
             if face_img is None or face_img.size == 0:
-                print("-> Không tìm thấy khuôn mặt! Vui lòng nhìn thẳng vào camera.")
+                print("-> No face detected. Please look directly at the camera.")
                 continue
 
-            tensor = preprocess_face(face_img)
-            current_vector = get_embedding(model, tensor, device)
+            input_array = preprocess_face(face_img)
+            current_vector = get_embedding(session, input_array)
 
             matched_locker, highest_sim = find_existing_locker(current_vector, lockers, THRESHOLD)
-
             if matched_locker is not None:
-                print(f"-> Xác thực thành công (Độ tin cậy: {highest_sim:.2f}). Mở tủ số {matched_locker}!")
+                print(f"-> Identity verified (similarity: {highest_sim:.2f}). "
+                      f"Locker #{matched_locker} is now open.")
                 lockers[matched_locker] = None
             else:
-                print("-> Khuôn mặt không khớp với bất kỳ tủ nào đang gửi đồ!")
+                print("-> Face does not match any active locker.")
 
     cap.release()
     cv2.destroyAllWindows()
