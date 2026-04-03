@@ -55,9 +55,9 @@ def check_liveness(face_img, liveness_session, liveness_threshold):
     input_array = img_normalized.transpose(2, 0, 1).astype(np.float32)
     input_array = np.expand_dims(input_array, axis=0)  # (1, 3, 224, 224)
 
-    debug_display = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)  # đổi lại BGR để imshow đúng màu
-    cv2.imshow("Liveness Input (112x112)", debug_display)
-    cv2.waitKey(1)
+    # debug_display = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)  # đổi lại BGR để imshow đúng màu
+    # cv2.imshow("Liveness Input (112x112)", debug_display)
+    # cv2.waitKey(1)
 
     # Inference
     input_name = liveness_session.get_inputs()[0].name
@@ -118,8 +118,8 @@ if __name__ == "__main__":
             x, y, w, h = detection
 
             # Thay padding cố định bằng padding tỉ lệ
-            pad_x = int(w * 0.4)  # 40% chiều rộng mặt
-            pad_y = int(h * 0.4)  # 40% chiều cao mặt
+            pad_x = int(w * 0.7)  # 40% chiều rộng mặt
+            pad_y = int(h * 0.7)  # 40% chiều cao mặt
 
             x1 = max(0, x - pad_x)
             y1 = max(0, y - pad_y)
