@@ -7,3 +7,5 @@ numpy
 pandas
 matplotlib
 pillow
+requests
+python-dotenv

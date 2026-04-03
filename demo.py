@@ -5,6 +5,13 @@ from PIL import Image, ImageTk
 import numpy as np
 import onnxruntime as ort
 import threading
+import requests
+import json
+from dotenv import load_dotenv
+import os
+
+# Load environment variables
+load_dotenv()
 
 # Import lại các hàm và module từ code cũ của bạn
 from inference_spoof import load_model, preprocess_face, get_embedding, check_liveness, find_existing_locker
@@ -22,7 +29,9 @@ class SmartLockerGUI:
         self.LIVENESS_PATH = 'saved_models/anti_spoof.onnx'
         self.RECOGNITION_THRESHOLD = 0.60
         self.LIVENESS_THRESHOLD = 0.90
-        self.lockers = {1: None, 2: None, 3: None, 4: None} # Mở rộng thêm tủ
+        
+        # --- BACKEND CONFIGURATION ---
+        self.BACKEND_URL = os.getenv('BACKEND_URL', 'http://localhost:3000/api/v1/sessions/cico/face')
         
         self.face_detector = None
         self.session = None
@@ -36,7 +45,7 @@ class SmartLockerGUI:
         threading.Thread(target=self.init_models, daemon=True).start()
 
         # --- KẾT NỐI CAMERA RASPBERRY PI ---
-        self.video_source = "http://100.118.31.76:5000/video"
+        self.video_source = os.getenv('CAMERA_URL', 'http://100.118.31.76:5000/video')
         self.vid = cv2.VideoCapture(self.video_source)
         
         if not self.vid.isOpened():
@@ -148,26 +157,66 @@ class SmartLockerGUI:
         input_array = preprocess_face(self.current_face_img)
         current_vector = get_embedding(self.session, input_array)
 
-        # 3. Xử lý Logic
-        if action == "check_in":
-            existing_locker, sim = find_existing_locker(current_vector, self.lockers, self.RECOGNITION_THRESHOLD)
-            if existing_locker is not None:
-                self.show_message(f"⚠️ Bạn đang có đồ ở tủ #{existing_locker}\nVui lòng lấy đồ ra trước.", "#F39C12")
-            else:
-                empty_locker = next((lid for lid, vec in self.lockers.items() if vec is None), None)
-                if empty_locker is None:
-                    self.show_message("❌ Rất tiếc, tất cả các tủ đều đã đầy.", "#E74C3C")
-                else:
-                    self.lockers[empty_locker] = current_vector
-                    self.show_message(f"✅ CẤT ĐỒ THÀNH CÔNG!\n\nTủ #{empty_locker} đang mở.", "#2ECC71")
+        # 3. Send face vector to backend
+        self.show_message("⏳ Đang xác thực với hệ thống...", "#F1C40F")
+        threading.Thread(target=self.send_to_backend, args=(action, current_vector), daemon=True).start()
 
-        elif action == "check_out":
-            matched_locker, highest_sim = find_existing_locker(current_vector, self.lockers, self.RECOGNITION_THRESHOLD)
-            if matched_locker is not None:
-                self.lockers[matched_locker] = None # Trống tủ
-                self.show_message(f"✅ XÁC THỰC THÀNH CÔNG!\n\nTủ #{matched_locker} đang mở.\n(Độ khớp: {highest_sim:.2f})", "#3498DB")
+    def send_to_backend(self, action, face_vector):
+        try:
+            # Prepare request payload
+            payload = {
+                "faceVector": face_vector.tolist() if isinstance(face_vector, np.ndarray) else face_vector
+            }
+            
+            # Determine auth method based on action
+            auth_method = "CHECK_IN" if action == "check_in" else "CHECK_OUT"
+            
+            # Send request to backend
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            response = requests.post(
+                self.BACKEND_URL,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            
+            if response.status_code == 200 or response.status_code == 201:
+                data = response.json()
+                
+                # Parse CICO Response
+                session_id = data.get('sessionId', 'N/A')
+                locker_info = data.get('locker', {})
+                locker_code = locker_info.get('lockerCode', 'N/A')
+                location = locker_info.get('location', 'N/A')
+                locker_id = locker_info.get('id', 'N/A')
+                check_in_at = data.get('checkInAt', 'N/A')
+                auth_method = data.get('authMethod', 'FaceID')
+                
+                if action == "check_in":
+                    message = f"✅ CẤT ĐỒ THÀNH CÔNG!\n\n"
+                    message += f"Tủ #{locker_id}\nMã: {locker_code}\n"
+                    message += f"Vị trí: {location}\n"
+                    message += f"Session: {session_id}"
+                    self.show_message(message, "#2ECC71")
+                else:
+                    message = f"✅ XÁC THỰC THÀNH CÔNG!\n\n"
+                    message += f"Tủ #{locker_id}\nMã: {locker_code}\n"
+                    message += f"Vị trí: {location}\n"
+                    message += f"Xác thực: {auth_method}"
+                    self.show_message(message, "#3498DB")
             else:
-                self.show_message("❌ Khuôn mặt không khớp\nvới bất kỳ tủ nào đang sử dụng.", "#E74C3C")
+                error_msg = response.json().get('message', 'Lỗi không xác định')
+                self.show_message(f"❌ Xác thực thất bại!\n{error_msg}", "#E74C3C")
+                
+        except requests.exceptions.ConnectionError:
+            self.show_message(f"❌ Lỗi kết nối Backend!\nKiểm tra URL: {self.BACKEND_URL}", "#E74C3C")
+        except requests.exceptions.Timeout:
+            self.show_message("❌ Hết thời gian chờ Backend!", "#E74C3C")
+        except Exception as e:
+            self.show_message(f"❌ Lỗi: {str(e)}", "#E74C3C")
 
     def __del__(self):
         if hasattr(self, 'vid') and self.vid.isOpened():
