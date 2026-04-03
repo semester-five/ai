@@ -98,15 +98,7 @@ def unfreeze_last_n_layers(model: AntiSpoofNet, n: int = 5):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[unfreeze_last_{n}] Trainable params: {n_trainable:,} "
           f"(backbone block {unfreeze_from}–{total_blocks-1} + classifier)")
-
-
-def unfreeze_all(model: AntiSpoofNet):
-    """Mở băng toàn bộ model (dùng khi muốn fine-tune sâu)."""
-    for param in model.parameters():
-        param.requires_grad = True
-    n = sum(p.numel() for p in model.parameters())
-    print(f"[unfreeze_all] Trainable params: {n:,}")
-
+    
 #  Test
 if __name__ == "__main__":
     model = AntiSpoofNet(pretrained=True)
