@@ -1,10 +1,8 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
-import torch
 
 from models.face_detector import FaceDetector
-from models.anti_spoof import AntiSpoofNet
 
 # ==========================================
 # 1. CÁC HÀM XỬ LÝ CHO NHẬN DIỆN KHUÔN MẶT
@@ -45,34 +43,41 @@ def find_existing_locker(current_vector: np.ndarray, lockers: dict, threshold: f
 # ==========================================
 # 2. CÁC HÀM XỬ LÝ CHO CHỐNG GIẢ MẠO (LIVENESS)
 # ==========================================
-def preprocess_for_liveness(face_crop, target_size=(224, 224), device='cpu'):
-    """Tiền xử lý cho AntiSpoofNet (PyTorch) -> Chuẩn ImageNet"""
-    img_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-    img_resized = cv2.resize(img_rgb, target_size)
+def check_liveness(face_img, liveness_session, liveness_threshold):
+    """Chạy anti-spoof bằng ONNX Runtime."""
+    # Preprocess giống cũ, nhưng ra numpy thay vì torch tensor
+    img_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+    img_resized = cv2.resize(img_rgb, (112, 112))
     img_normalized = img_resized / 255.0
     mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
+    std  = np.array([0.229, 0.224, 0.225])
     img_normalized = (img_normalized - mean) / std
-    img_final = img_normalized.transpose(2, 0, 1).astype(np.float32)
-    return torch.from_numpy(img_final).unsqueeze(0).to(device)
+    input_array = img_normalized.transpose(2, 0, 1).astype(np.float32)
+    input_array = np.expand_dims(input_array, axis=0)  # (1, 3, 224, 224)
 
-def check_liveness(face_img, liveness_net, device, liveness_threshold):
-    """Chạy anti-spoof và trả về (is_real, score, label)."""
-    liveness_input = preprocess_for_liveness(face_img, device=device)
-    with torch.inference_mode():
-        outputs = liveness_net(liveness_input)
-        probabilities = torch.softmax(outputs, dim=1)
-        score, predicted_idx = torch.max(probabilities, dim=1)
-        liveness_score = score.item()
-        is_real = (predicted_idx.item() == 1) and (liveness_score >= liveness_threshold)
+    debug_display = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)  # đổi lại BGR để imshow đúng màu
+    cv2.imshow("Liveness Input (112x112)", debug_display)
+    cv2.waitKey(1)
+
+    # Inference
+    input_name = liveness_session.get_inputs()[0].name
+    logits = liveness_session.run(None, {input_name: input_array})[0]  # (1, 2)
+
+    # Softmax thủ công
+    exp_logits = np.exp(logits - logits.max())
+    probs = exp_logits / exp_logits.sum()
+
+    predicted_idx = int(np.argmax(probs))
+    liveness_score = float(probs[0][predicted_idx])
+
+    is_real = (predicted_idx == 1) and (liveness_score >= liveness_threshold)
     return is_real, liveness_score
 
 
 if __name__ == "__main__":
     # --- CONFIG ---
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     WEIGHTS_PATH = 'saved_models/mobilefacenet_int8.onnx'
-    LIVENESS_PATH = 'saved_models/anti_spoof.pth'
+    LIVENESS_PATH = 'saved_models/anti_spoof.onnx'
 
     RECOGNITION_THRESHOLD = 0.60
     LIVENESS_THRESHOLD = 0.90
@@ -81,12 +86,10 @@ if __name__ == "__main__":
     face_detector = FaceDetector()
     session = load_model(WEIGHTS_PATH)
 
-    print(f"Đang nạp bộ não Anti-Spoofing ({LIVENESS_PATH}) trên {DEVICE}...")
-    liveness_net = AntiSpoofNet(pretrained=False).to(DEVICE)
-    liveness_net.load_state_dict(torch.load(LIVENESS_PATH, map_location=DEVICE))
-    liveness_net.eval()
+    print(f"Đang nạp Anti-Spoofing ({LIVENESS_PATH})...")
+    liveness_session = ort.InferenceSession(LIVENESS_PATH, providers=['CPUExecutionProvider'])
     print("-> Model Liveness loaded.")
-
+    
     # --- DATABASE TỦ ĐỒ (RAM) ---
     lockers = {1: None, 2: None}
 
@@ -113,8 +116,15 @@ if __name__ == "__main__":
 
         if detection is not None:
             x, y, w, h = detection
-            x1, y1 = max(0, x - 20), max(0, y - 20)
-            x2, y2 = min(iw, x + w + 20), min(ih, y + h + 20)
+
+            # Thay padding cố định bằng padding tỉ lệ
+            pad_x = int(w * 0.4)  # 40% chiều rộng mặt
+            pad_y = int(h * 0.4)  # 40% chiều cao mặt
+
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(iw, x + w + pad_x)
+            y2 = min(ih, y + h + pad_y)
 
             if w > 10 and h > 10:
                 face_img = frame[y1:y2, x1:x2]
@@ -141,9 +151,7 @@ if __name__ == "__main__":
                 continue
 
             # BƯỚC 1: Kiểm tra liveness tại thời điểm nhấn phím
-            is_real, liveness_score = check_liveness(
-                face_img, liveness_net, DEVICE, LIVENESS_THRESHOLD
-            )
+            is_real, liveness_score = check_liveness(face_img, liveness_session, LIVENESS_THRESHOLD)
 
             if not is_real:
                 print(f"-> 🚨 CẢNH BÁO: Phát hiện khuôn mặt GIẢ! (Score: {liveness_score:.2f})")
