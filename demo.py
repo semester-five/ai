@@ -5,29 +5,35 @@ from PIL import Image, ImageTk
 import numpy as np
 import onnxruntime as ort
 import threading
+import queue
 
 # Import lại các hàm và module từ code cũ của bạn
-from inference_spoof import load_model, preprocess_face, get_embedding, check_liveness, find_existing_locker
+from inference import load_model, preprocess_face, get_embedding, check_liveness, find_existing_locker
 from models.face_detector import FaceDetector
 
 class SmartLockerGUI:
     def __init__(self, window, window_title):
         self.window = window
         self.window.title(window_title)
-        self.window.geometry("1000x600")
+        self.window.geometry("1000x1000")
         self.window.configure(bg="#2C3E50") # Màu nền tối hiện đại
+        
+        # Khởi tạo Hàng đợi chứa thông báo
+        self.msg_queue = queue.Queue()
 
         # --- CẤU HÌNH AI & DATABASE ---
         self.WEIGHTS_PATH = 'saved_models/mobilefacenet_int8.onnx'
         self.LIVENESS_PATH = 'saved_models/anti_spoof.onnx'
         self.RECOGNITION_THRESHOLD = 0.60
         self.LIVENESS_THRESHOLD = 0.90
-        self.lockers = {1: None, 2: None, 3: None, 4: None} # Mở rộng thêm tủ
+        self.lockers = {1: None, 2: None, 3: None, 4: None}
         
         self.face_detector = None
         self.session = None
         self.liveness_session = None
         self.current_face_img = None # Lưu khuôn mặt hiện tại để quét
+
+        self.process_queue()
 
         # --- SETUP GIAO DIỆN ---
         self.setup_ui()
@@ -94,7 +100,21 @@ class SmartLockerGUI:
             self.show_message(f"Lỗi nạp model: {str(e)}", "#E74C3C")
 
     def show_message(self, text, color):
-        self.window.after(0, lambda: self.lbl_message.config(text=text, fg=color))
+        self.msg_queue.put((text, color))
+
+    def process_queue(self):
+        try:
+            # Rút toàn bộ tin nhắn đang có trong hàng đợi ra (không chờ đợi)
+            while True:
+                text, color = self.msg_queue.get_nowait()
+                # Cập nhật giao diện (Lúc này hàm chạy an toàn trên luồng chính)
+                self.lbl_message.config(text=text, fg=color)
+        except queue.Empty:
+            # Hàng đợi rỗng thì bỏ qua
+            pass
+        finally:
+            # Lặp lại việc kiểm tra "hòm thư" này sau mỗi 100 mili-giây
+            self.window.after(100, self.process_queue)
 
     def update_frame(self):
         ret, frame = self.vid.read()
