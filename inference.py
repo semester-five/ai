@@ -1,9 +1,13 @@
+import os
+
 import cv2
 import numpy as np
 import onnxruntime as ort
 import torch
+from requests import RequestException
 
 from models.face_detector import FaceDetector
+from utils.face_payload_sender import send_face_data
 
 # ==========================================
 # 1. CÁC HÀM XỬ LÝ CHO NHẬN DIỆN KHUÔN MẶT
@@ -189,7 +193,16 @@ if __name__ == "__main__":
                         print(f"   📊 Thông tin người dùng:")
                         print(f"      • Tuổi ước tính: {age:.1f} tuổi")
                         print(f"      • Giới tính: {gender_label} (độ tin cậy: {gender_conf:.2%})")
-                        
+                        try:
+                            send_face_data(
+                                faceVector=current_vector,
+                                age=age,
+                                gender=gender_label,
+                                confidence=gender_conf,
+                                locker_id=empty_locker,
+                            )
+                        except RequestException as exc:
+                            print(f"-> ⚠️ Gửi dữ liệu khuôn mặt thất bại: {exc}")
                         # Hiển thị ảnh đã xử lý
                         face_bgr = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2BGR)
                         cv2.imshow("Age/Gender Input (224x224)", face_bgr)
