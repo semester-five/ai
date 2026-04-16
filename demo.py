@@ -46,7 +46,7 @@ class SmartLockerGUI:
 
         # --- KẾT NỐI CAMERA ---
         # Dùng webcam cục bộ (0) hoặc camera Raspberry Pi (URL)
-        self.video_source = "http://100.118.31.76:5000/video"
+        self.video_source = 0
         self.vid = cv2.VideoCapture(self.video_source)
         
         if not self.vid.isOpened():
