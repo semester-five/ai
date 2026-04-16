@@ -5,7 +5,7 @@ from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
 class AgeGenderMobileNetV3(nn.Module):
     """
     MobileNetV3-Large fine-tuned cho bài toán:
-    - Tuổi: hồi quy (regression) – đầu ra 1 giá trị (range: 0-120)
+    - Tuổi: hồi quy (regression) – đầu ra 1 giá trị (range: 4-90)
     - Giới tính: phân loại nhị phân – đầu ra 2 logits
       * 0: Nam (male)
       * 1: Nữ (female)
@@ -65,12 +65,12 @@ class AgeGenderMobileNetV3(nn.Module):
         Args:
             x (torch.Tensor): batch ảnh đầu vào, shape (B, 3, H, W)
         Returns:
-            age (torch.Tensor): shape (B, 1) – giá trị tuổi dự đoán (0-120)
+            age (torch.Tensor): shape (B, 1) – giá trị tuổi dự đoán (4 - 90)
             gender (torch.Tensor): shape (B, 2) – logits cho 2 lớp (Nam/Nữ)
         """
         features = self.backbone(x)          # shape (B, num_features)
         age = self.age_head(features)        # (B, 1) – raw output
-        age = torch.clamp(age, min=0, max=120)  # Clamp vào range [0, 120]
+        age = torch.clamp(age, min=4, max=90)  # Clamp vào range [4, 90]
         gender = self.gender_head(features)  # (B, 2)
         return age, gender
 
@@ -187,18 +187,6 @@ class SafeAgeGenderLosses(AgeGenderLosses):
         except Exception as e:
             print(f"❌ Error in loss computation: {e}")
             raise
-
-def get_optimizer(model, lr=1e-3):
-    """
-    Tạo optimizer (Adam) cho model.
-    Chỉ optimize các params có requires_grad=True,
-    nên hoạt động đúng khi backbone đang bị freeze.
-    """
-    return torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=lr
-    )
-
 
 def get_scheduler(optimizer, total_epochs, warmup_epochs=3):
     """
